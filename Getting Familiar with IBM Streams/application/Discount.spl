@@ -1,0 +1,47 @@
+
+
+composite Discount
+{
+	graph
+		stream<rstring transactionID, rstring firstName, rstring lastName, float64 purchaseAmount> Customer = FileSource()
+		{
+			param
+				file : getSubmissionTimeValue("file") ;
+				format : csv ;
+				hasHeaderLine : true;
+		}
+
+		() as DiscountSink = FileSink(Computed)
+		{
+			param
+				file : "CustomerStatus.txt" ;
+				format : line ;	
+		}
+		
+		(stream<rstring discountTransaction> Computed) = Functor(Customer)
+		{
+			logic
+				state :
+				{
+					mutable float64 discount;
+				}
+				onTuple Customer :
+				{
+					if (purchaseAmount >= 1000.0) {
+						discount = purchaseAmount * .05;
+					}
+					else if (purchaseAmount >= 500.0) {
+						discount = purchaseAmount * .02;
+					}
+					else if (purchaseAmount >= 250.0) {
+						discount = purchaseAmount * .01;
+					}
+					else
+						discount = 0.0;
+				}
+			output
+				Computed: discountTransaction = transactionID + ", " + firstName + lastName + ", " + (rstring) purchaseAmount + ", " + (rstring) discount;
+		}
+
+}
+

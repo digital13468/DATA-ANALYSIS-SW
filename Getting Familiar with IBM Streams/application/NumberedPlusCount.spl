@@ -1,0 +1,76 @@
+
+
+composite NumberedPlusCount
+{
+	graph
+		stream<rstring contents> Lines = FileSource()
+		{
+			param
+				file : getSubmissionTimeValue("file") ;	// input file given at run time
+				format : line ;
+		}
+
+		(stream<rstring nl> NumberedLine) = Functor(Numbered)
+		{
+			logic
+				state: mutable rstring line;	// numbered line to output
+				onTuple Numbered:
+				{
+					line = (rstring)num + " " + contents;	// number and content
+				}
+			output
+				NumberedLine: nl = line;	// numbered content
+		}
+		
+		(stream<rstring wc> WordCount) = Functor(Count)
+		{
+			logic
+				state: mutable rstring countLine;	// occurence and word in one line
+				onTuple Count:
+				{
+					countLine = word + ": " + (rstring) count;	// combine word and occurence
+				}
+			output
+				WordCount: wc = countLine;	// output the word count
+		}
+		() as NumberedSink = FileSink(NumberedLine)
+		{
+			param
+				file : "bigresults.txt" ;	// output file for numbered content
+				format : line ;	
+		}
+		() as CountedSink = FileSink(WordCount)
+		{
+			param
+				file : "counts.txt" ;	// output file for word count
+				format : line ;	
+		}
+		(stream<rstring word, int32 count> Count; stream<int32 num,rstring contents> Numbered) = Custom(Lines)
+		{
+			logic
+				state :
+				{
+					mutable int32 i = 0 ;	// line number
+					mutable int32 historyCount = 0;	// occurence for "history"
+					mutable int32 adventureCount = 0;	// occurence for "adventure"
+				}
+				onTuple Lines :
+				{
+					i ++ ;	// update line number
+					list<rstring> tokens = tokenize(contents, " ", false);	// tokenize lines and retireve the tokens, http://ibmstreams.github.io/streamsx.documentation/samples/
+					for(rstring word in tokens) {	// update occurence when seeing the words
+						if (word == "history") historyCount ++;
+						else if (word == "adventure") adventureCount ++;
+					}
+					submit({num=i,contents=contents}, Numbered);	// send the numbered content each line
+				}
+				onPunct Lines: {
+					if(currentPunct() == Sys.FinalMarker) {	// when end of stream, send the word and its counts
+						submit({word="history", count=historyCount}, Count);	
+						submit({word="adventure", count=adventureCount}, Count);
+					}
+				}
+		}
+
+}
+
