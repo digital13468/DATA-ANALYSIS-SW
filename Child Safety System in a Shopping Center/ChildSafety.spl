@@ -1,0 +1,609 @@
+namespace application ;
+
+composite ChildSafety
+{
+	graph
+		(stream<rstring enteringTime, rstring childID, rstring parentName, rstring childName, rstring parentPhoneNumber> ChildDetails) = FileSource()
+		{
+			param
+				file : "ChildDetails.csv";
+				format : csv ;	// no need to tokenize each line 
+				hasHeaderLine : false;	// ignore the header of a csv file
+		}
+		
+		(stream<rstring timeStamp, rstring sensorID, rstring childID, rstring fromRoom, rstring toRoom> SensorData) = FileSource()
+		{
+			param
+				file : "SensorData.csv";
+				format : csv ;	// no need to tokenize each line 
+				hasHeaderLine : false;	// ignore the header of a csv file
+		}
+		
+		(stream<rstring childStatsLine> ChildStatsOutput) = Functor(ChildStats)
+		{
+			logic
+				state: mutable rstring line;	
+				onTuple ChildStats:
+				{	// title and content
+					if (findFirst(timeStamp, "======") != -1)
+						line = timeStamp + " " + childNumber + " " + numberOfDistinctRooms;
+					else
+						line = timeStamp + ", " + childNumber + ", " + numberOfDistinctRooms;
+				}
+			output
+				ChildStatsOutput: childStatsLine = line;	
+		}
+		
+		() as ChildStatsSink = FileSink(ChildStatsOutput)
+		{
+			param
+				file : "ChildStats.txt" ;	// output file
+				format : line ;	
+		}
+				
+		(stream<rstring roomStatsLine> RoomStatsOutput) = Functor(RoomStats)
+		{
+			logic
+				state: mutable rstring line;	
+				onTuple RoomStats:
+				{	// title and content
+					if (findFirst(timeStamp, "======") != -1)
+						line = timeStamp + " " + roomNumber + " " + numberOfDistinctChildren;
+					else
+						line = timeStamp + ", " + roomNumber + ", " + numberOfDistinctChildren;
+				}
+			output
+				RoomStatsOutput: roomStatsLine = line;	
+		}
+		
+		() as RoomStatsSink = FileSink(RoomStatsOutput)
+		{
+			param
+				file : "RoomStats.txt" ;	// output file
+				format : line ;	
+		}
+		
+		(stream<rstring unsafeRoomAlertLine> UnsafeRoomAlertOutput) = Functor(UnsafeRoomAlert)
+		{
+			logic
+				state: mutable rstring line;	
+				onTuple UnsafeRoomAlert:
+				{	// title and content
+					if (findFirst(timeStamp, "======") != -1)
+						line = timeStamp + " " + childID + " " + parentPhoneNumber;
+					else
+						line = timeStamp + ", " + childID + ", " + parentPhoneNumber;
+				}
+			output
+				UnsafeRoomAlertOutput: unsafeRoomAlertLine = line;	
+		}
+		
+		() as UnsafeRoomAlertSink = FileSink(UnsafeRoomAlertOutput)
+		{
+			param
+				file : "UnsafeRoomAlert.txt" ;	// output file
+				format : line ;	
+		}
+				
+		(stream<rstring missingChildAlertLine> MissingChildAlertOutput) = Functor(MissingChildAlert)
+		{
+			logic
+				state: mutable rstring line;	
+				onTuple MissingChildAlert:
+				{	// title and content
+					if (findFirst(currentTime, "======") != -1)
+						line = currentTime + " " + childID + " " + timeLastSeen;// + " " + roomLastSeen + " " + parentPhoneNumber;
+					else	
+						line = currentTime + ", " + childID + ", " + timeLastSeen + ", " + roomLastSeen + ", " + parentPhoneNumber;
+				}
+			output
+				MissingChildAlertOutput: missingChildAlertLine = line;	
+		}
+		
+		() as MissingChildAlertSink = FileSink(MissingChildAlertOutput)
+		{
+			param
+				file : "MissingChildAlert.txt" ;	// output file
+				format : line ;	
+		}
+		
+		(stream<rstring locationLogLine> LocationLogOutput) = Functor(LocationLog)
+		{
+			logic
+				state: mutable rstring line;	
+				onTuple LocationLog:
+				{	// title and content
+					if (findFirst(timeStamp, "======") != -1)
+						line = timeStamp + " " + childID + " " + currentRoom;
+					else
+						line = timeStamp + ", " + childID + ", " + currentRoom;
+				}
+			output
+				LocationLogOutput: locationLogLine = line;
+		}
+		
+		() as LocationLogSink = FileSink(LocationLogOutput)
+		{
+			param
+				file : "LocationLog.txt" ;	// output file
+				format : line ;	
+		}		
+		
+		(stream<rstring timeStamp, rstring childID, rstring currentRoom, rstring phoneNumber> SequencingStream) = Custom(ChildDetails; SensorData)
+		{
+			logic
+				state :
+				{
+					mutable list<rstring> childDetails;	// ChildDetails stream buffer
+					mutable list<rstring> sensorData;	// SensorData stream buffer
+
+					mutable map<rstring, map<rstring, rstring>> childDetailsMap;	// (key = entering time, value = (key = child ID, value = room 1000))
+					mutable map<rstring, map<rstring, rstring>> sensorDataMap;	// (key = timestamp, value = (key = child ID, value = to room))
+					mutable map<rstring, rstring> phoneNum;	// parent phone number
+					mutable boolean childDetailsIsFinished = false;	// reach the end of ChildDetails file?
+					mutable boolean sensorDataIsFinished = false;	// reach the end of SensorData file?
+				}
+				onTuple SensorData:	// when a data item from SensorData arrive
+				{	
+
+					appendM(sensorData, timeStamp);	// put into the SensorData buffer with the new data item
+					 
+					// update the SensorData map with the new data item
+					if (has(sensorDataMap, timeStamp)) { // if another event triggered with the same timestamp
+						mutable map <rstring, rstring> sd = sensorDataMap[timeStamp];
+						insertM(sd, childID, toRoom);
+						sensorDataMap[timeStamp] = sd;
+						int32 idx = size(sensorData) - 1;
+						removeM(sensorData, idx);
+					}
+						
+					else {
+						mutable map<rstring, rstring> sd = {};
+						insertM(sd, childID, toRoom);
+						insertM(sensorDataMap, timeStamp, sd);
+					} 
+					// when the ChildDetails buffer holds some elements, check between the two buffers, which has the earlier data item, output the item and update map
+					if (size(childDetails) != 0) {
+
+						list<rstring> childDetailsTime = tokenize(childDetails[0], ":", false);
+						list<rstring> sensorDataTime = tokenize(sensorData[0], ":", false);
+						float64 childDetailsTimeInSeconds = (float64)childDetailsTime[0] * 3600.0 + (float64)childDetailsTime[1] * 60.0 + (float64)childDetailsTime[2];
+						float64 sensorDataTimeInSeconds = (float64)sensorDataTime[0] * 3600.0 + (float64)sensorDataTime[1] * 60.0 + (float64)sensorDataTime[2];
+
+						if (childDetailsTimeInSeconds < sensorDataTimeInSeconds) {
+							for (rstring childID in childDetailsMap[childDetails[0]]) {
+								submit({timeStamp = childDetails[0], childID = childID, 
+									currentRoom = childDetailsMap[childDetails[0]][childID], phoneNumber = phoneNum[childID]}, SequencingStream);
+
+							}
+							removeM(childDetailsMap, childDetails[0]);
+							removeM(childDetails, 0);
+						}
+						else {
+							for (rstring childID in sensorDataMap[sensorData[0]]) {
+								submit({timeStamp = sensorData[0], childID = childID, currentRoom = sensorDataMap[sensorData[0]][childID], 
+								phoneNumber = phoneNum[childID]}, SequencingStream);
+
+							}
+							removeM(sensorDataMap, sensorData[0]);
+							removeM(sensorData, 0);
+						}
+					}
+					else if (childDetailsIsFinished == true) {	// if there is no more data item from ChildDetails stream, output the remaining data item in this buffer
+						while(size(sensorData) > 0) {
+							for (rstring childID in sensorDataMap[sensorData[0]]) {
+								submit({timeStamp = sensorData[0], childID = childID, currentRoom = sensorDataMap[sensorData[0]][childID], 
+								phoneNumber = phoneNum[childID]}, SequencingStream);
+
+							}
+							removeM(sensorDataMap, sensorData[0]);
+							removeM(sensorData, 0);
+						}	
+					}
+				}
+				onTuple ChildDetails:	// when a data item from ChildDetails arrives
+				{
+
+					appendM(childDetails, enteringTime);	// increment the buffer with the item 
+					phoneNum[childID] = parentPhoneNumber;	
+					if (has(childDetailsMap, enteringTime)) {	// events whose timestamp are the same
+						mutable map <rstring, rstring> cd = childDetailsMap[enteringTime];
+						insertM(cd, childID, "1000");
+						childDetailsMap[enteringTime] = cd;
+						int32 idx = size(childDetails) - 1;
+						removeM(childDetails, idx);
+					}
+						
+					else {	
+						mutable map<rstring, rstring> cd = {};
+						insertM(cd, childID, "1000");
+						insertM(childDetailsMap, enteringTime, cd);
+					} 
+					// the other buffer holds element, then see which has the earlier data item based on the timestamp information
+					if (size(sensorData) != 0) {	
+						list<rstring> childDetailsTime = tokenize(childDetails[0], ":", false);
+						list<rstring> sensorDataTime = tokenize(sensorData[0], ":", false);
+						float64 childDetailsTimeInSeconds = (float64)childDetailsTime[0] * 3600.0 + (float64)childDetailsTime[1] * 60.0 + (float64)childDetailsTime[2];
+						float64 sensorDataTimeInSeconds = (float64)sensorDataTime[0] * 3600.0 + (float64)sensorDataTime[1] * 60.0 + (float64)sensorDataTime[2];
+						// output the earlier data items and update respective maps and buffers
+						if (childDetailsTimeInSeconds < sensorDataTimeInSeconds) {
+							for (rstring childID in childDetailsMap[childDetails[0]]) {
+								submit({timeStamp = childDetails[0], childID = childID, 
+									currentRoom = childDetailsMap[childDetails[0]][childID], phoneNumber = phoneNum[childID]}, SequencingStream);
+								
+							}
+							removeM(childDetailsMap, childDetails[0]);
+							removeM(childDetails, 0);
+						}
+						else {
+							for (rstring childID in sensorDataMap[sensorData[0]]) {
+								submit({timeStamp = sensorData[0], childID = childID, currentRoom = sensorDataMap[sensorData[0]][childID],
+									phoneNumber = phoneNum[childID]}, SequencingStream);
+
+							}
+							removeM(sensorDataMap, sensorData[0]);
+							removeM(sensorData, 0);
+						}												
+					}
+					else if (sensorDataIsFinished == true) {	// if the other buffer is closed, flush this one by outputing data items till it is empty
+						while (size(childDetails) > 0) {
+							for (rstring childID in childDetailsMap[childDetails[0]]) {
+								submit({timeStamp = childDetails[0], childID = childID, 
+									currentRoom = childDetailsMap[childDetails[0]][childID], phoneNumber = phoneNum[childID]}, SequencingStream);
+							}
+							removeM(childDetailsMap, childDetails[0]);
+							removeM(childDetails, 0);
+	
+						}					
+					}
+				}
+				onPunct SensorData:	// set flags of the end of streams
+				{
+					if (currentPunct() == Sys.FinalMarker) {
+						sensorDataIsFinished = true;
+
+					}
+				}
+				onPunct ChildDetails:
+				{
+					if (currentPunct() == Sys.FinalMarker) {
+						childDetailsIsFinished = true;
+	
+					}
+				}
+		}
+		
+		(stream<rstring timeStamp, rstring childID, rstring currentRoom> LocationLog) = Custom(SequencingStream)
+		{
+			logic
+				state :
+				{
+					mutable map<rstring, rstring> locationLogTimestamp;	// (key = child ID, value = timestamp)
+					mutable map<rstring, rstring> locationLogCurrentRoom;	// (key = child ID, value = current room)
+					mutable int32 minute = 545;	// first report at 9:05 AM
+			
+				}
+				onTuple SequencingStream:
+				{
+					list<rstring> tokenizedTimestamp = tokenize(timeStamp, ":", false);
+					while ((int32)tokenizedTimestamp[0] * 60 + (int32)tokenizedTimestamp[1] >= minute) {	// condition for generating report
+						
+						mutable rstring h = (rstring)(int32)(minute / 60);
+						mutable rstring m = (rstring)(int32)(minute % 60);
+						if ((int32)h < 10)
+							h = "0" + h;
+						if ((int32)m < 10)
+							m = "0" + m;
+						rstring reportTitle = h + ":" + m + " Child Location Report";
+						submit({timeStamp = "=========", childID = reportTitle, currentRoom = "========="}, LocationLog);	// 5-min report title
+						list<rstring> childIDs = sort(keys(locationLogCurrentRoom));
+						for (rstring childID in childIDs) {
+							
+							if (locationLogCurrentRoom[childID] != 'E')
+								
+								submit({timeStamp = locationLogTimestamp[childID], childID = childID, currentRoom = locationLogCurrentRoom[childID]}, LocationLog);
+						}
+						minute = minute + 5;
+					}
+					locationLogCurrentRoom[childID] = currentRoom;
+					locationLogTimestamp[childID] = timeStamp;
+				}
+				onPunct SequencingStream:	// when stream ends, output the last reports
+				{
+					if (currentPunct() == Sys.FinalMarker) {
+						mutable boolean nextReport = true;
+
+						while (nextReport == true) {
+							nextReport = false;
+							int32 h = minute / 60;
+							int32 m = minute % 60;
+							rstring reportTitle = (rstring)h + ":" + (rstring)m + " Child Location Report";
+							submit({timeStamp = "=========", childID = reportTitle, currentRoom = "========="}, LocationLog);
+							for (rstring childID in locationLogTimestamp) {
+								list<rstring> tokenizedTimestamp = tokenize(locationLogTimestamp[childID], ":", false);
+								if ((int32)tokenizedTimestamp[0] * 60 + (int32)tokenizedTimestamp[1] < minute) {
+									if (locationLogCurrentRoom[childID] != 'E')
+										submit({timeStamp = locationLogTimestamp[childID], childID = childID, currentRoom = locationLogCurrentRoom[childID]}, 
+												LocationLog);
+																	
+								}
+								else {
+									nextReport = true;
+								}
+							}
+							minute = minute + 5;	
+						}
+					}
+				}
+		}
+
+		(stream<rstring currentTime, rstring childID, rstring timeLastSeen, rstring roomLastSeen, rstring parentPhoneNumber> MissingChildAlert) = 
+			Custom(SequencingStream)
+		{
+			logic
+				state :
+				{
+					mutable map<rstring,list<rstring>> childLastSeen;	// (key = child ID, value = [timestamp, current toom])
+					mutable map<rstring, rstring> childParentPhoneNumber;
+
+			
+				}
+				onTuple SequencingStream:
+				{
+					if (findFirstOf(phoneNumber, '-') == 3 && findLastOf(phoneNumber, '-', length(phoneNumber) - 1) == 7) 
+						childParentPhoneNumber[childID] = phoneNumber;
+					if (currentRoom != 'E') {		
+						list<rstring> lastSeen = [timeStamp, currentRoom];
+
+						childLastSeen[childID] = lastSeen;
+					}
+					else
+						removeM(childLastSeen, childID);
+
+
+					list<rstring> sortedChildLastSeen = sort(keys(childLastSeen));	
+					list<rstring> tokenizedTimestamp = tokenize(timeStamp, ":", false);
+					mutable boolean reportTitleIncluded = false;
+					for (rstring childID in sortedChildLastSeen) {	// generate alert if the last seen time if 15 minutes ago or longer
+						list<rstring> tokenizedLastSeenTime = tokenize(childLastSeen[childID][0], ":", false);
+						if ((float64)tokenizedTimestamp[0] * 3600.0 + (float64)tokenizedTimestamp[1] * 60.0 + (float64)tokenizedTimestamp[2] >= 
+							900.0 + (float64)tokenizedLastSeenTime[0] * 3600.0 + (float64)tokenizedLastSeenTime[1] * 60.0 + (float64)tokenizedLastSeenTime[2]) {
+							if (reportTitleIncluded == false) {
+								
+								submit({currentTime = "=========", childID = "Latest Missing Child Alert", timeLastSeen = "=========",
+									roomLastSeen = "", parentPhoneNumber = ""}, MissingChildAlert);
+								reportTitleIncluded = true;
+							}
+
+									
+							submit({currentTime = timeStamp, childID = childID, timeLastSeen = childLastSeen[childID][0], 
+								roomLastSeen = childLastSeen[childID][1], parentPhoneNumber = childParentPhoneNumber[childID]}, 
+								MissingChildAlert);
+
+
+						}
+
+					}
+				}
+		}
+		
+		(stream<rstring timeStamp, rstring childID, rstring parentPhoneNumber> UnsafeRoomAlert) = Custom(SequencingStream)
+		{
+			logic
+				state :
+				{
+					mutable map<rstring, rstring> kidsInRoom26;	// (key = child ID, value = timestamp)
+					mutable map<rstring, rstring> childParentPhoneNumber;
+
+			
+				}
+				onTuple SequencingStream:
+				{
+					if (findFirstOf(phoneNumber, '-') == 3 && findLastOf(phoneNumber, '-', length(phoneNumber) - 1) == 7)	// phone number available from ChildDetails
+						childParentPhoneNumber[childID] = phoneNumber;
+					if (currentRoom == '26') {	
+
+
+						kidsInRoom26[childID] = timeStamp;
+					}
+					else	// if the kid leaves room 26, remove it from the map
+						removeM(kidsInRoom26, childID);
+
+
+					list<rstring> sortedKidsInRoom26 = sort(keys(kidsInRoom26));	
+					list<rstring> tokenizedTimestamp = tokenize(timeStamp, ":", false);
+					mutable boolean reportTitleIncluded = false;
+					for (rstring childID in sortedKidsInRoom26) {	// a kid has stayed for more than 5 minutes based on the entering time, generate alert
+						list<rstring> tokenizedLastSeenTime = tokenize(kidsInRoom26[childID], ":", false);
+						if ((float64)tokenizedTimestamp[0] * 3600.0 + (float64)tokenizedTimestamp[1] * 60.0 + (float64)tokenizedTimestamp[2] >= 
+							300.0 + (float64)tokenizedLastSeenTime[0] * 3600.0 + (float64)tokenizedLastSeenTime[1] * 60.0 + (float64)tokenizedLastSeenTime[2]) {
+							if (reportTitleIncluded == false) {
+								rstring reportTitle = timeStamp + " Latest Unsafe Room Alert";
+								submit({timeStamp = "=========", childID = reportTitle, parentPhoneNumber = "========="}, UnsafeRoomAlert);
+								reportTitleIncluded = true;
+							}
+	
+							submit({timeStamp = kidsInRoom26[childID], childID = childID, parentPhoneNumber = childParentPhoneNumber[childID]}, UnsafeRoomAlert);
+
+
+						}
+
+					}
+				}
+		}
+		
+		(stream<rstring timeStamp, rstring roomNumber, rstring numberOfDistinctChildren> RoomStats; 
+			stream<rstring timeStamp, rstring childNumber, rstring numberOfDistinctRooms> ChildStats) = Custom(SequencingStream)
+		{
+			logic
+				state :
+				{
+					mutable map<rstring, map<rstring, rstring>> roomStats;	// (key = room, value = (key = child ID, value = timestamp))
+					mutable map<rstring, map<rstring, rstring>> childStats;	// (key = child ID, value = (key = room, value = timestamp))
+					mutable int32 hour = 10;	// first report is at 10 AM 
+					mutable map<rstring, rstring> childInRoom;	// helper map to keep track of locations of children
+				}
+				onTuple SequencingStream:
+				{
+					list<rstring> tokenizedTimestamp = tokenize(timeStamp, ":", false);
+					while ((int32)tokenizedTimestamp[0] >= hour) {	// condition for generating next stats
+						
+						submit({timeStamp = "=========", roomNumber = "Latest Room Stats", numberOfDistinctChildren = "========="}, RoomStats);	// title line
+						mutable list<int32> roomNumbers = range(27);
+						appendM(roomNumbers, 1000);	// 27 room in total, excluding room 'E'
+						for (int32 roomNum in roomNumbers) {
+							rstring room = (rstring)roomNum;
+							if (has(roomStats, room)) {
+								submit({timeStamp = (rstring)(hour - 1) + ":00-" + (rstring)hour + ":00", roomNumber = room, 
+									numberOfDistinctChildren = (rstring)size(roomStats[room])}, RoomStats);
+							
+	
+								mutable map<rstring, rstring> childInRoomTime = roomStats[room];	// who have visited the room
+								for (rstring child in roomStats[room]) {
+									if (!has(childInRoom, child)) {	// children have left the center
+										removeM(childInRoomTime, child);
+									}
+									else {
+										if (childInRoom[child] != room) { 	// the child stays in the room at the beginning of the next hour
+											removeM(childInRoomTime, child);
+										}
+										else 
+											if (tokenizedTimestamp[1] == "00" && tokenizedTimestamp[2] == "00.000" && child == childID) {	// if not over the exact 
+												removeM(childInRoomTime, child);
+											}
+									}
+								}
+								if (size(childInRoomTime) > 0)
+									roomStats[room] = childInRoomTime;
+								else
+									removeM(roomStats, room);	
+							}						
+							else {
+								submit({timeStamp = (rstring)(hour - 1) + ":00-" + (rstring)hour + ":00", roomNumber = room, numberOfDistinctChildren = "0"}, 
+									RoomStats);
+							}
+						}
+						
+						submit({timeStamp = "=========", childNumber = " Latest Child Stats", numberOfDistinctRooms = "========="}, ChildStats);
+						list<rstring> childList = sort(keys(childStats));
+						for (rstring child in childList) {
+							
+
+							submit({timeStamp = (rstring)(hour - 1) + ":00-" + (rstring)hour + ":00", childNumber = child, 
+								numberOfDistinctRooms = (rstring)size(childStats[child])}, ChildStats);
+
+							mutable map<rstring, rstring> roomChildVisited = childStats[child];	// what rooms have been visited by the child
+							for (rstring room in childStats[child]) {
+								if (!has(childInRoom, child))	
+									removeM(roomChildVisited, room);
+								else {
+									if (childInRoom[child] != room) 
+										removeM(roomChildVisited, room);
+									else
+										if (tokenizedTimestamp[1] == "00" && tokenizedTimestamp[2] == "00.000" && child == childID) {
+											removeM(roomChildVisited, room);
+										}
+								}
+							}
+							if (size(roomChildVisited) > 0)
+								childStats[child] = roomChildVisited;
+							else
+								removeM(childStats, child);
+						}
+						
+						hour = hour + 1;	
+					}
+
+					if (currentRoom != 'E') {
+						if (has(roomStats, currentRoom)) {
+							mutable map<rstring, rstring> childInRoomTime = roomStats[currentRoom];
+							insertM(childInRoomTime, childID, timeStamp);
+							roomStats[currentRoom] = childInRoomTime;
+							
+						}
+						else {
+							mutable map<rstring, rstring> childInRoomTime = {};
+							insertM(childInRoomTime, childID, timeStamp);
+							insertM(roomStats, currentRoom, childInRoomTime);
+						}	
+						if (has(childStats, childID)) {
+							mutable map<rstring, rstring> roomChildVisited = childStats[childID];
+							insertM(roomChildVisited, currentRoom, timeStamp);
+							childStats[childID] = roomChildVisited;
+						}					
+						else {
+							mutable map<rstring, rstring> roomChildVisited = {};
+							insertM(roomChildVisited, currentRoom, timeStamp);
+							insertM(childStats, childID, roomChildVisited);
+						}
+						childInRoom[childID] = currentRoom;
+					}
+					else
+						removeM(childInRoom, childID);
+				}
+				onPunct SequencingStream:
+				{
+					if (currentPunct() == Sys.FinalMarker) {	// logic is the same as above
+
+							
+							submit({timeStamp = "=========", roomNumber = " Latest Room Stats", numberOfDistinctChildren = "========="}, RoomStats);
+							mutable list<int32> roomNumbers = range(27);
+							appendM(roomNumbers, 1000);
+							for (int32 roomNum in roomNumbers) {
+								rstring room = (rstring)roomNum;
+								if (has(roomStats, room)) {
+									submit({timeStamp = (rstring)(hour - 1) + ":00-" + (rstring)hour + ":00", roomNumber = room, 
+										numberOfDistinctChildren = (rstring)size(roomStats[room])},	RoomStats);
+								
+								
+									mutable map<rstring, rstring> childInRoomTime = roomStats[room];
+									for (rstring child in roomStats[room]) {
+										if (!has(childInRoom, child)) {
+											removeM(childInRoomTime, child);
+										}
+										else {
+											if (childInRoom[child] != room) { 
+												removeM(childInRoomTime, child);
+											}
+										}
+									}
+									if (size(childInRoomTime) > 0) 
+										roomStats[room] = childInRoomTime;
+									else
+										removeM(roomStats, room);
+								}
+								else {
+									submit({timeStamp = (rstring)(hour - 1) + ":00-" + (rstring)hour + ":00", roomNumber = room, numberOfDistinctChildren = "0"}, 
+										RoomStats);
+								}
+							}
+							
+							submit({timeStamp = "=========", childNumber = "Latest Child Stats", numberOfDistinctRooms = "========="}, ChildStats);
+							list<rstring> childList = sort(keys(childStats));
+							for (rstring child in childList) {
+								
+	
+								submit({timeStamp = (rstring)(hour - 1) + ":00-" + (rstring)hour + ":00", childNumber = child, 
+									numberOfDistinctRooms = (rstring)size(childStats[child])}, ChildStats);
+	
+								mutable map<rstring, rstring> roomChildVisited = childStats[child];
+								for (rstring room in childStats[child]) {
+									if (!has(childInRoom, child))
+										removeM(roomChildVisited, room);
+									else {
+										if (childInRoom[child] != room) 
+											removeM(roomChildVisited, room);
+									}
+								}
+								if (size(roomChildVisited) > 0)
+									childStats[child] = roomChildVisited;
+								else
+									removeM(childStats, child);
+							}
+							
+
+					}
+				}
+		}
+}
+
